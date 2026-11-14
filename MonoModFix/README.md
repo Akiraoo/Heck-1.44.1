@@ -2,7 +2,35 @@
 
 在 Beat Saber 1.44.1（Unity 6、Mono）上，Chroma 的燈光事件譜面會出現「第一次載入沒東西、黑屏或原生當機」，
 而且有機率發生。原因不在 Heck／Chroma／NoodleExtensions，而是 BSIPA 附帶的 **MonoMod.Core 1.3.3** 的記憶體配置器有 bug。
-這個資料夾提供修正 patch 與重現、套用方式。
+這個資料夾放的是修改版 MonoMod.Core 的原始碼與 patch。
+
+這是非官方的個人版本，Heck 作者或 BSIPA 釋出正式更新後，請改用官方版本。
+
+## 直接安裝（給一般玩家）
+
+到本 repo 的 Releases 下載 zip，解壓縮後的結構與遊戲資料夾相同：
+
+```
+Libs/MonoMod.Core.dll
+Plugins/Heck.dll
+Plugins/Chroma.dll
+Plugins/NoodleExtensions.dll
+```
+
+1. 關閉 Beat Saber。
+2. 備份遊戲資料夾裡原本的 `Libs\MonoMod.Core.dll`。
+3. 把 zip 裡的 `Libs`、`Plugins` 直接覆蓋到遊戲資料夾（也就是有 `Beat Saber.exe` 的那一層）。
+
+還需要的相依模組（zip 不包含）：BSIPA、SiraUtil、BSML、CustomJSONData（1.44.1 版）、LookupID。
+
+用 BSManager 重新安裝或修復 BSIPA 時，`Libs\MonoMod.Core.dll` 可能被換回原版，請再覆蓋一次。
+
+## 原始碼
+
+- `src/MonoMod.Core/...`：修改過的三個檔案（完整內容），對應 MonoMod repo 裡的同路徑檔案。
+- `monomod-core-1.3.3-fix.patch`：同樣的修改，以 diff 形式呈現。
+- `MonoMod-LICENSE.txt`：MonoMod 的授權（MIT）。
+- Heck、Chroma、NoodleExtensions 的原始碼就是本 repo 本身（上游 Aeroluna/Heck `dev` 分支的 1.44.1 支援，未修改）。
 
 ## 症狀
 
@@ -47,7 +75,7 @@ MonoMod 上游 `main` 已經在 `TryAllocNewPage` 加入範圍檢查，但截至
 git clone https://github.com/MonoMod/MonoMod.git && cd MonoMod
 git checkout aa4a8474906ded4423d222cdf9ea5cf884c32b5f
 git submodule update --init --depth 1
-git apply /path/to/monomod-core-1.3.3-fix.patch
+git apply /path/to/monomod-core-1.3.3-fix.patch   # 或把 MonoModFix/src 底下的三個檔案直接覆蓋過去
 # global.json 鎖定 SDK 10.0.100；若只有較新的 SDK，把 rollForward 改成 latestMajor
 dotnet build src/MonoMod.Core/MonoMod.Core.csproj -c Release -f net452
 ```
