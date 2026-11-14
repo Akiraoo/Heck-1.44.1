@@ -1,0 +1,183 @@
+diff --git a/src/MonoMod.Core/Platforms/Architectures/x86_64Arch.cs b/src/MonoMod.Core/Platforms/Architectures/x86_64Arch.cs
+index 7219359..71f586f 100644
+--- a/src/MonoMod.Core/Platforms/Architectures/x86_64Arch.cs
++++ b/src/MonoMod.Core/Platforms/Architectures/x86_64Arch.cs
+@@ -303,9 +303,12 @@ namespace MonoMod.Core.Platforms.Architectures
+                 Helpers.ThrowIfArgumentNull(data);
+                 var alloc = (IAllocatedMemory)data;
+ 
++                var disp = (long)alloc.BaseAddress - ((long)from + 6);
++                if (disp < int.MinValue || disp > int.MaxValue)
++                    throw new InvalidOperationException("Rel32Ind64 indirection cell out of rel32 range");
+                 buffer[0] = 0xff;
+                 buffer[1] = 0x25;
+-                Unsafe.WriteUnaligned(ref buffer[2], (int)(alloc.BaseAddress - ((nint)from + 6)));
++                Unsafe.WriteUnaligned(ref buffer[2], (int)disp);
+ 
+                 Unsafe.WriteUnaligned(ref alloc.Memory[0], to);
+ 
+@@ -374,7 +377,17 @@ namespace MonoMod.Core.Platforms.Architectures
+             var memRequest = new PositionedAllocationRequest((nint)target, (nint)lowBound, (nint)highBound, new(IntPtr.Size));
+             if (sizeHint >= Rel32Ind64Kind.Instance.Size && system.MemoryAllocator.TryAllocateInRange(memRequest, out var allocated))
+             {
+-                return new(from, to, Rel32Ind64Kind.Instance, allocated);
++                // FIX: the allocator has been observed (Unity 6 / Mono, Windows x64) to return memory outside of the
++                // requested +-2GB range. A rel32 indirect jump to such a cell truncates the displacement and jumps
++                // through garbage/unmapped memory. Verify the range, and fall back to Abs64 if it does not fit.
++                var disp = (long)allocated.BaseAddress - (long)target;
++                if (disp >= int.MinValue && disp <= int.MaxValue)
++                {
++                    return new(from, to, Rel32Ind64Kind.Instance, allocated);
++                }
++
++                MMDbgLog.Warning("Indirect detour cell 0x" + ((long)allocated.BaseAddress).ToString("x16") + " is out of rel32 range of 0x" + ((long)from).ToString("x16") + "; falling back to Abs64");
++                allocated.Dispose();
+             }
+ 
+             // TODO: more, smaller detours
+diff --git a/src/MonoMod.Core/Platforms/Memory/PagedMemoryAllocator.cs b/src/MonoMod.Core/Platforms/Memory/PagedMemoryAllocator.cs
+index 3016577..7881d2a 100644
+--- a/src/MonoMod.Core/Platforms/Memory/PagedMemoryAllocator.cs
++++ b/src/MonoMod.Core/Platforms/Memory/PagedMemoryAllocator.cs
+@@ -375,21 +375,24 @@ namespace MonoMod.Core.Platforms.Memory
+             pageCount++;
+         }
+ 
+-        private void RemoveAllocatedPage(Page page)
++        private bool RemoveAllocatedPage(Page page)
+         {
+             var list = allocationList.AsSpan();
+ 
+             var indexToRemove = list.Slice(0, pageCount).BinarySearch(page, new PageComparer());
+ 
+-            if (indexToRemove < 0)
++            // a page that was already freed may find a new page at the same address
++            // (backport of MonoMod d6bf3d8e8 / PR #335)
++            if (indexToRemove < 0 || list[indexToRemove] != page)
+             {
+                 // the page doesn't exist, nothing needs to be done
+-                return;
++                return false;
+             }
+ 
+             // just copy from above the index down
+             list.Slice(indexToRemove + 1).CopyTo(list.Slice(indexToRemove));
+             pageCount--;
++            return true;
+         }
+ 
+         private ReadOnlySpan<Page> AllocList => allocationList.AsSpan().Slice(0, pageCount)!;
+@@ -439,7 +442,10 @@ namespace MonoMod.Core.Platforms.Memory
+                         continue;
+ 
+                     // otherwise, remove it from the allocation list, so we can free it outside the lock
+-                    RemoveAllocatedPage(page);
++                    // if it was already removed (queued for cleanup twice), it must not be freed again,
++                    // as a new page may now live at the same address
++                    if (!RemoveAllocatedPage(page))
++                        continue;
+                 }
+ 
+                 // now we can actually free the associated memory
+@@ -506,33 +512,40 @@ namespace MonoMod.Core.Platforms.Memory
+                     var lowIdx = targetIndex - 1;
+                     var highIdx = targetIndex;
+ 
+-                    while ((uint)highIdx <= AllocList.Length && (uint)lowIdx < AllocList.Length
+-                        && (lowIdx >= lowIdxBound || highIdx < highIdxBound))
++                    bool didStep;
++                    do
+                     {
++                        didStep = false;
++
+                         // try high pages, while they're closer than low pages
+                         while (
+                             (uint)highIdx < AllocList.Length &&
+                             highIdx < highIdxBound &&
+-                            (lowIdx < lowIdxBound || target - AllocList[lowIdx].BaseAddr > AllocList[highIdx].BaseAddr - target)
++                            (lowIdx < lowIdxBound || 
++                                ((uint)lowIdx < AllocList.Length && target - AllocList[lowIdx].BaseAddr >= AllocList[highIdx].BaseAddr - target))
+                         )
+                         {
+                             if (TryAllocWithPage(AllocList[highIdx], request, out allocated))
+                                 return true;
+                             highIdx++;
++                            didStep = true;
+                         }
+ 
+                         // then try low pages, while they're closer than high pages
+                         while (
+                             (uint)lowIdx < AllocList.Length &&
+                             lowIdx >= lowIdxBound &&
+-                            (highIdx >= highIdxBound || target - AllocList[lowIdx].BaseAddr < AllocList[highIdx].BaseAddr - target)
++                            (highIdx >= highIdxBound ||
++                                ((uint)highIdx < AllocList.Length && target - AllocList[lowIdx].BaseAddr <= AllocList[highIdx].BaseAddr - target))
+                         )
+                         {
+                             if (TryAllocWithPage(AllocList[lowIdx], request, out allocated))
+                                 return true;
+-                            lowIdx++;
++                            lowIdx--;
++                            didStep = true;
+                         }
+                     }
++                    while (didStep);
+ 
+                     // if we fall out here, no adequate page was found
+                 }
+diff --git a/src/MonoMod.Core/Platforms/Memory/QueryingPagedMemoryAllocator.cs b/src/MonoMod.Core/Platforms/Memory/QueryingPagedMemoryAllocator.cs
+index 8a2a0b1..c6fcac9 100644
+--- a/src/MonoMod.Core/Platforms/Memory/QueryingPagedMemoryAllocator.cs
++++ b/src/MonoMod.Core/Platforms/Memory/QueryingPagedMemoryAllocator.cs
+@@ -101,10 +101,11 @@ namespace MonoMod.Core.Platforms.Memory
+ 
+             while (lowPage >= lowPageBound || highPage < highPageBound)
+             {
+-                // first check the high pages, while they're closer than low pages
++                // first check the high pages, while they're at least as close as low pages
++                // (the two conditions must be complementary, or an equidistant target would spin forever)
+                 while (
+                     highPage < highPageBound &&
+-                    (lowPage < lowPageBound || target - lowPage > highPage - target)
++                    (lowPage < lowPageBound || target - lowPage >= highPage - target)
+                 )
+                 {
+                     if (TryAllocNewPage(request, ref highPage, true, out allocated))
+@@ -134,7 +135,20 @@ namespace MonoMod.Core.Platforms.Memory
+                 if (!isFree) // this is not a free block, so we don't care
+                     goto Fail;
+ 
+-                if (!pageAlloc.TryAllocatePage(page, PageSize, request.Base.Executable, out var allocBase)) // allocation failed
++                // A free region usually starts where the previous allocation ended, which need not be aligned to our page size
++                // (on Windows, the allocation granularity), and the OS cannot allocate there. Use the first aligned address in the
++                // region instead; otherwise every free region reached that way, however large, would be skipped.
++                var pageMask = (nint)PageSize - 1;
++                var candidate = (page + pageMask) & ~pageMask;
++                if (candidate + PageSize > baseAddr + allocSize)
++                    goto Fail;
++
++                // Address 0 means "anywhere" to the OS allocators (e.g. VirtualAlloc), which would hand back a page that may be
++                // far outside of the requested range. This happens when the downward search reaches the bottom of the address space.
++                if (candidate == 0)
++                    goto Fail;
++
++                if (!pageAlloc.TryAllocatePage(candidate, PageSize, request.Base.Executable, out var allocBase)) // allocation failed
+                     goto Fail;
+ 
+                 var pageObj = new Page(this, allocBase, (uint)PageSize, request.Base.Executable);
+@@ -148,6 +162,15 @@ namespace MonoMod.Core.Platforms.Memory
+                     goto Fail;
+                 }
+ 
++                if ((nint)alloc.BaseAddress < request.LowBound || (nint)alloc.BaseAddress >= request.HighBound)
++                {
++                    // never hand out memory outside of the requested range (equivalent to the check in upstream MonoMod)
++                    MMDbgLog.Error("Got out-of-bounds allocation 0x" + ((long)alloc.BaseAddress).ToString("x16") + " for request at 0x" + ((long)request.Target).ToString("x16")
++                        + " within [0x" + ((long)request.LowBound).ToString("x16") + ", 0x" + ((long)request.HighBound).ToString("x16") + ")");
++                    alloc.Dispose();
++                    goto Fail;
++                }
++
+                 // we successfully allocated, return the page allocation
+                 allocated = alloc;
+                 return true;
