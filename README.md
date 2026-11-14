@@ -57,6 +57,16 @@ BSIPA 附帶的 MonoMod.Core 1.3.3 有 bug：附近的空間用完時（Chroma �
 修正版加上了範圍檢查：不再向系統要位址 0、拒絕範圍外的記憶體；萬一還是太遠，就改用不需要小格子、多遠都能跳的寫法。
 技術細節（含 debugger 抓到的現場）見 [`MonoModFix/README.md`](MonoModFix/README.md)。
 
+## 分支
+
+| 分支 | 用途 |
+|---|---|
+| `monomod-core-fix`（預設） | 這個 fork 的主要版本：上游 1.44.1 支援 + 修正版 MonoMod 原始碼 + 本說明。Releases 都從這裡建立 |
+| `master` | 上游 [Aeroluna/Heck](https://github.com/Aeroluna/Heck) 的鏡像，不放任何自己的修改，只用來同步上游 |
+
+上游有更新時：先把上游同步到 `master`，再把 `master` 合進 `monomod-core-fix`。
+通常只有根目錄 `README.md` 會衝突，保留這邊的版本即可。
+
 ## 原始碼結構
 
 | 路徑 | 內容 |
@@ -71,7 +81,7 @@ BSIPA 附帶的 MonoMod.Core 1.3.3 有 bug：附近的空間用完時（Chroma �
 需要 .NET SDK 10，以及一個 Beat Saber 1.44.1 的安裝（編譯時要參照遊戲的 DLL）。
 
 ```bash
-git clone --recurse-submodules -b monomod-core-fix https://github.com/Akiraoo/Heck-1.44.1.git
+git clone --recurse-submodules https://github.com/Akiraoo/Heck-1.44.1.git
 cd Heck-1.44.1
 ```
 
