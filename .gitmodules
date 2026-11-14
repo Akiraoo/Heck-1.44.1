@@ -1,0 +1,3 @@
+[submodule "MonoMod/external/iced"]
+	path = MonoMod/external/iced
+	url = https://github.com/icedland/iced.git
